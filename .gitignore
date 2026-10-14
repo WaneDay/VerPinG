@@ -2,6 +2,9 @@
 /build/
 /dist/
 
+# local test runs (never commit)
+/test-run/
+
 # runtime data (portable/exe dir)
 /config.json
 /logs/
@@ -14,3 +17,6 @@
 # python (reference implementation)
 __pycache__/
 *.pyc
+
+# release setup exe is published to git intentionally (negation must stay last)
+!/release/VerPinG-Setup-1.0.0.exe

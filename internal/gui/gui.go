@@ -1,15 +1,20 @@
-﻿package gui
+package gui
 
 import (
+	"fmt"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 
 	"verping/internal/agent"
+	"verping/internal/api"
 	"verping/internal/autostart"
 	"verping/internal/config"
 	"verping/internal/logger"
@@ -34,6 +39,18 @@ func loadIcon(exeDir string) walk.Image {
 		}
 	}
 	return nil
+}
+
+// editAtBottom reports whether a log view is scrolled to the end,
+// so auto-scroll never yanks the wheel away while reading history.
+func editAtBottom(te *walk.TextEdit) bool {
+	var si win.SCROLLINFO
+	si.CbSize = uint32(unsafe.Sizeof(si))
+	si.FMask = win.SIF_RANGE | win.SIF_PAGE | win.SIF_POS
+	if !win.GetScrollInfo(te.Handle(), win.SB_VERT, &si) {
+		return true
+	}
+	return int(si.NPos)+int(si.NPage) >= int(si.NMax)
 }
 
 // Run builds and runs the native window + tray icon. It blocks until exit and
@@ -142,15 +159,24 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 
 	bar, _ := walk.NewComposite(sgb)
 	_ = bar.SetLayout(walk.NewHBoxLayout())
+	_, _ = walk.NewHSpacer(bar)
 	btnSave, _ := walk.NewPushButton(bar)
 	_ = btnSave.SetText("保存设置")
 	btnReload, _ := walk.NewPushButton(bar)
 	_ = btnReload.SetText("重载配置")
 	btnCheck, _ := walk.NewPushButton(bar)
 	_ = btnCheck.SetText("立即检查")
+	btnLog, _ := walk.NewPushButton(bar)
+	_ = btnLog.SetText("日志目录")
+	btnTest, _ := walk.NewPushButton(bar)
+	_ = btnTest.SetText("测试连接")
 	_, _ = walk.NewHSpacer(bar)
-	status, _ := walk.NewLabel(bar)
 	span(bar)
+
+	status, _ := walk.NewLabel(sgb)
+	_ = status.SetText("")
+	_ = status.SetTextAlignment(walk.AlignCenter)
+	span(status)
 
 	// ---- log ----
 	lgb, _ := walk.NewGroupBox(center)
@@ -212,6 +238,29 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 	btnCheck.Clicked().Attach(func() {
 		_ = status.SetText("已触发检查…")
 		g.ag.Kick()
+	})
+	btnLog.Clicked().Attach(func() {
+		if err := exec.Command("explorer.exe", filepath.Join(g.dir, "logs")).Start(); err != nil {
+			_ = status.SetText("打开日志目录失败: " + err.Error())
+		}
+	})
+	btnTest.Clicked().Attach(func() {
+		to := g.cfg.HTTPTimeoutMs
+		if to <= 0 {
+			to = 5000
+		}
+		cli := api.New(strings.TrimSpace(leURL.Text()), leSecret.Text(), time.Duration(to)*time.Millisecond)
+		ver, err := cli.VersionString()
+		if err != nil {
+			_ = status.SetText("连接失败: " + err.Error())
+			return
+		}
+		pr, err := cli.GetProxies()
+		if err != nil {
+			_ = status.SetText("连接失败: " + err.Error())
+			return
+		}
+		_ = status.SetText(fmt.Sprintf("连接正常：内核 %s，策略组 %d 个", ver, len(pr.Proxies)))
 	})
 	cbAuto.CheckedChanged().Attach(func() {
 		if g.loading {
@@ -279,7 +328,8 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 		}
 	})
 
-	// ---- periodic log refresh ----
+	// ---- periodic log refresh (append-only so the wheel keeps working;
+	// auto-scroll only when already at the bottom) ----
 	stopRefresh := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -294,12 +344,38 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 				if txt == last {
 					continue
 				}
+				add := txt
+				incremental := false
+				if last != "" && strings.HasPrefix(txt, last) {
+					add = txt[len(last):]
+					incremental = true
+				}
 				last = txt
 				mw.Synchronize(func() {
-					_ = logEdit.SetText(txt)
-					n := logEdit.TextLength()
-					logEdit.SetTextSelection(n, n)
-					logEdit.ScrollToCaret()
+					if !incremental {
+						_ = logEdit.SetText(txt)
+						n := logEdit.TextLength()
+						logEdit.SetTextSelection(n, n)
+						logEdit.ScrollToCaret()
+						return
+					}
+					atBottom := editAtBottom(logEdit)
+					logEdit.AppendText(add)
+					if logEdit.TextLength() > 60000 {
+						keep := logEdit.Text()
+						if len(keep) > 20000 {
+							keep = keep[len(keep)-20000:]
+							if i := strings.Index(keep, "\n"); i >= 0 {
+								keep = keep[i+1:]
+							}
+						}
+						_ = logEdit.SetText(keep)
+					}
+					if atBottom {
+						n := logEdit.TextLength()
+						logEdit.SetTextSelection(n, n)
+						logEdit.ScrollToCaret()
+					}
 				})
 			}
 		}

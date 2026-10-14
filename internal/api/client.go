@@ -59,6 +59,10 @@ func (c *Client) GetProxies() (*ProxiesResp, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get proxies %d: %s", resp.StatusCode, string(b))
+	}
 	var pr ProxiesResp
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		return nil, err
@@ -111,6 +115,27 @@ func (c *Client) GetVersion() error {
 	return nil
 }
 
+// VersionString returns the core version string for the self-test button.
+func (c *Client) VersionString() (string, error) {
+	req, _ := http.NewRequest("GET", c.base+"/version", nil)
+	resp, err := c.do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("version %d: %s", resp.StatusCode, string(b))
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	return body.Version, nil
+}
+
 // DelayTest actively tests a single node delay via the controller.
 func (c *Client) DelayTest(node, testURL string, delayTimeoutMs int) int {
 	q := url.Values{}
@@ -122,6 +147,9 @@ func (c *Client) DelayTest(node, testURL string, delayTimeoutMs int) int {
 		return 0
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return 0
+	}
 	var body struct {
 		Delay int `json:"delay"`
 	}

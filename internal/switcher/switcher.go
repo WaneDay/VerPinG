@@ -52,17 +52,24 @@ func RunOnce(cfg config.Config) {
 		return cli.DelayTest(name, cfg.TestURL, cfg.DelayTimeoutMs)
 	}
 
-	curDelay := getHistoryDelay(gp)
+	// The current node is always freshly tested ("refresh, then judge"),
+	// so the decision matches what a dashboard manual test shows.
+	// History is only a fallback when the live test fails.
+	curDelay := activeDelay(cur)
+	curSrc := "fresh"
 	if curDelay == 0 {
-		if p, ok := pr.Proxies[cur]; ok {
-			curDelay = getHistoryDelay(p)
+		curDelay = getHistoryDelay(gp)
+		if curDelay == 0 {
+			if p, ok := pr.Proxies[cur]; ok {
+				curDelay = getHistoryDelay(p)
+			}
 		}
+		curSrc = "history"
 	}
 	if curDelay == 0 {
-		curDelay = activeDelay(cur)
-		logger.Infof("current delay unknown, active test -> %d", curDelay)
+		logger.Warn("current delay unknown (live test + history both empty): " + cur)
 	}
-	logger.Infof("current node=%s delay=%d country=%s group=%s", cur, curDelay, m.CountryOf(cur), group)
+	logger.Infof("current node=%s delay=%d(%s) country=%s group=%s", cur, curDelay, curSrc, m.CountryOf(cur), group)
 
 	if curDelay > 0 && curDelay <= threshold {
 		logger.Info("current <= threshold, skip")
@@ -79,20 +86,10 @@ func RunOnce(cfg config.Config) {
 		seen[name] = true
 		names = append(names, name)
 	}
-
-	pool := map[string]int{}
-	withHist := 0
-	for _, n := range names {
-		d := 0
-		if p, ok := pr.Proxies[n]; ok {
-			d = getHistoryDelay(p)
-		}
-		pool[n] = d
-		if d > 0 {
-			withHist++
-		}
+	if len(names) == 0 {
+		logger.Warn("no real candidate nodes found (all filtered), skip")
+		return
 	}
-	logger.Infof("candidates total=%d with-history=%d", len(names), withHist)
 
 	maxConc := cfg.MaxConcurrentDelayTests
 	if maxConc < 1 {
@@ -119,6 +116,37 @@ func RunOnce(cfg config.Config) {
 		return res
 	}
 
+	// Seed the pool from history; fresh tests below overwrite per node.
+	pool := map[string]int{}
+	withHist := 0
+	for _, n := range names {
+		d := 0
+		if p, ok := pr.Proxies[n]; ok {
+			d = getHistoryDelay(p)
+		}
+		pool[n] = d
+		if d > 0 {
+			withHist++
+		}
+	}
+	logger.Infof("candidates total=%d with-history=%d", len(names), withHist)
+
+	fillMissing := func(cands []string) {
+		var need []string
+		for _, n := range cands {
+			if pool[n] == 0 {
+				need = append(need, n)
+			}
+		}
+		if len(need) > 0 {
+			for n, d := range testMany(need) {
+				if d > 0 {
+					pool[n] = d
+				}
+			}
+		}
+	}
+
 	pick := func(cands []string) (string, int, bool) {
 		type pair struct {
 			name  string
@@ -138,73 +166,99 @@ func RunOnce(cfg config.Config) {
 		return usable[0].name, usable[0].delay, true
 	}
 
-	fillMissing := func(cands []string) {
-		var need []string
-		for _, n := range cands {
-			if pool[n] == 0 {
-				need = append(need, n)
-			}
+	doSelect := func(stage, name string, d int) {
+		if err := cli.PutSelect(group, name); err != nil {
+			logger.Error("switch fail " + name + ": " + err.Error())
+		} else {
+			logger.Infof("switched to %s: %s delay=%d", stage, name, d)
 		}
-		if len(need) > 0 {
-			for n, d := range testMany(need) {
+	}
+
+	// Stage 1: same-country nodes, freshly tested (small set, cheap).
+	if cfg.PreferSameCountry {
+		cc := m.CountryOf(cur)
+		if cc == "" {
+			logger.Info("current country unknown, skip same-country stage")
+		} else {
+			var same []string
+			for _, n := range names {
+				if m.CountryOf(n) == cc {
+					same = append(same, n)
+				}
+			}
+			for n, d := range testMany(same) {
 				if d > 0 {
 					pool[n] = d
 				}
 			}
-		}
-	}
-
-	sameCountryCands := make([]string, 0, len(names))
-	if cfg.PreferSameCountry {
-		cc := m.CountryOf(cur)
-		if cc != "" {
-			for _, n := range names {
-				if m.CountryOf(n) == cc {
-					sameCountryCands = append(sameCountryCands, n)
-				}
-			}
-			fillMissing(sameCountryCands)
-			if name, d, ok := pick(sameCountryCands); ok {
-				if err := cli.PutSelect(group, name); err != nil {
-					logger.Error("switch fail " + name + ": " + err.Error())
-				} else {
-					logger.Infof("switched to same-country < threshold: %s delay=%d country=%s", name, d, cc)
-				}
+			if name, d, ok := pick(same); ok {
+				doSelect("same-country < threshold", name, d)
 				return
 			}
-			logger.Infof("no same-country < threshold (country=%s, tested=%d)", cc, len(sameCountryCands))
-		} else {
-			logger.Info("current country unknown, skip same-country stage")
+			logger.Infof("no same-country < threshold (country=%s, tested=%d)", cc, len(same))
 		}
 	}
 
+	// Stage 2: whole group by history, but verify the pick with one live
+	// test before switching (up to 3 attempts) so stale history can neither
+	// cause a bad switch nor hide behind an outdated number.
 	fillMissing(names)
-	if name, d, ok := pick(names); ok {
-		if err := cli.PutSelect(group, name); err != nil {
-			logger.Error("switch fail " + name + ": " + err.Error())
-		} else {
-			logger.Infof("switched to global lowest < threshold: %s delay=%d", name, d)
+	for tried := 0; tried < 3; tried++ {
+		name, d, ok := pick(names)
+		if !ok {
+			break
 		}
-		return
+		vd := activeDelay(name)
+		if vd > 0 && vd <= threshold {
+			doSelect("global lowest < threshold", name, vd)
+			return
+		}
+		logger.Infof("verify failed, skip candidate: %s history=%d fresh=%d", name, d, vd)
+		pool[name] = vd
 	}
 
-	if len(cfg.FallbackProfiles) > 0 {
-		logger.Warn("all nodes > threshold, fallback_profiles configured but this build skips auto profile switch")
+	// Fallback: everything is above threshold — switch to the currently
+	// lowest-delay node and pop a reminder, then keep the timed loop going.
+	fillMissing(names)
+	best, bd := "", 0
+	for _, n := range names {
+		if d := pool[n]; d > 0 && (bd == 0 || d < bd) {
+			best, bd = n, d
+		}
 	}
+	if best == "" {
+		logger.Warn("all candidates delay unknown, skip")
+		return
+	}
+	// NOTE: the fallback switch runs even in test_mode (same class of action
+	// as stage 1/2, which also run in test_mode); test_mode only suppresses
+	// the popup, so a bad stretch stays visible yet silent.
+	if best == cur {
+		logger.Warnf("already on lowest-delay node: %s delay=%d > threshold=%d", cur, bd, threshold)
+	} else if err := cli.PutSelect(group, best); err != nil {
+		logger.Error("fallback switch fail " + best + ": " + err.Error())
+		return
+	} else if cfg.TestMode {
+		logger.Warnf("[TEST_MODE] switched to lowest (no popup): %s delay=%d (threshold=%d)", best, bd, threshold)
+	} else {
+		logger.Warnf("fallback: all > threshold, switched to lowest: %s delay=%d (threshold=%d)", best, bd, threshold)
+	}
+	if !cfg.TestMode {
+		popupFallbackOnce(group, best, bd, threshold)
+	}
+}
 
-	if len(names) == 0 {
-		logger.Warn("no real candidate nodes found (all filtered), skip close")
+// lastPopupKey suppresses repeat popups while stuck on the same fallback
+// target, so a long all-bad stretch reminds once instead of every cycle.
+var lastPopupKey string
+
+func popupFallbackOnce(group, best string, bd, threshold int) {
+	key := group + "|" + best
+	if key == lastPopupKey {
+		logger.Info("fallback popup suppressed (unchanged): " + best)
 		return
 	}
-	if cfg.TestMode {
-		logger.Warn("[TEST_MODE] would call PATCH /configs {mode:off} and skip system popup")
-		return
-	}
-	if err := cli.PatchModeOff(); err != nil {
-		logger.Error("patch mode off fail: " + err.Error())
-		return
-	}
-	logger.Warn("system proxy closed: all nodes > threshold")
-	notify.Popup("Clash Verge 自动切换",
-		fmt.Sprintf("系统代理已关闭：当前所有可用节点延时均 > %dms，暂无符合要求的低延时节点。", threshold))
+	lastPopupKey = key
+	go notify.Popup("VerPinG",
+		fmt.Sprintf("当前所有节点延时均超过阈值 %dms。\r\n已切换到相对最低延时节点：%s（%dms）。\r\n将继续定时巡检，发现符合要求的节点会自动切换。", threshold, best, bd))
 }

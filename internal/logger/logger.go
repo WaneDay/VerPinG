@@ -47,6 +47,9 @@ func Error(msg string) { write("ERROR", msg) }
 // Infof logs a formatted informational line.
 func Infof(format string, a ...any) { write("INFO", fmt.Sprintf(format, a...)) }
 
+// Warnf logs a formatted warning line.
+func Warnf(format string, a ...any) { write("WARN", fmt.Sprintf(format, a...)) }
+
 // Path returns the current log file path.
 func Path() string { return path }
 
