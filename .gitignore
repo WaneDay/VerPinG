@@ -1,0 +1,16 @@
+# build output
+/build/
+/dist/
+
+# runtime data (portable/exe dir)
+/config.json
+/logs/
+
+# go
+*.exe
+*.test
+*.out
+
+# python (reference implementation)
+__pycache__/
+*.pyc
