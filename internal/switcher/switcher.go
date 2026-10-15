@@ -174,6 +174,45 @@ func RunOnce(cfg config.Config) {
 		}
 	}
 
+	// Fast path ("instant switch"): the panel keeps per-node delay history, so
+	// when a node is already known to be under threshold we re-verify just
+	// that one node live and switch, instead of sweeping the whole group. It
+	// is still a real live check, so stale history cannot produce a bad
+	// switch. Candidates are tried same-country first, then global (matching
+	// the preference below); if neither verifies we fall through to the
+	// thorough stages.
+	cc := ""
+	if cfg.PreferSameCountry {
+		cc = m.CountryOf(cur)
+	}
+	fastProbe := func(cands []string) bool {
+		name, _, ok := pick(cands)
+		if !ok {
+			return false
+		}
+		vd := activeDelay(name)
+		if vd > 0 && vd <= threshold {
+			doSelect("fast (history), verified", name, vd)
+			return true
+		}
+		pool[name] = vd
+		return false
+	}
+	if cc != "" {
+		var sameCands []string
+		for _, n := range names {
+			if m.CountryOf(n) == cc {
+				sameCands = append(sameCands, n)
+			}
+		}
+		if fastProbe(sameCands) {
+			return
+		}
+	}
+	if fastProbe(names) {
+		return
+	}
+
 	// Stage 1: same-country nodes, freshly tested (small set, cheap).
 	if cfg.PreferSameCountry {
 		cc := m.CountryOf(cur)

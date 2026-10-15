@@ -35,9 +35,9 @@ func Default() Config {
 		ControllerURL:           "http://127.0.0.1:9090",
 		Secret:                  "set-your-secret",
 		TestURL:                 "https://cp.cloudflare.com/generate_204",
-		DelayTimeoutMs:          5000,
+		DelayTimeoutMs:          2000,
 		HTTPTimeoutMs:           5000,
-		MaxConcurrentDelayTests: 4,
+		MaxConcurrentDelayTests: 8,
 		CoreReadyRetries:        7,
 		CoreReadyIntervalMs:     1800,
 		TestMode:                true,
@@ -85,13 +85,13 @@ func applyDefaults(c *Config) {
 		c.TestURL = "https://cp.cloudflare.com/generate_204"
 	}
 	if c.DelayTimeoutMs <= 0 {
-		c.DelayTimeoutMs = 5000
+		c.DelayTimeoutMs = 2000
 	}
 	if c.HTTPTimeoutMs <= 0 {
 		c.HTTPTimeoutMs = 5000
 	}
 	if c.MaxConcurrentDelayTests < 1 {
-		c.MaxConcurrentDelayTests = 4
+		c.MaxConcurrentDelayTests = 8
 	}
 	if c.CoreReadyRetries <= 0 {
 		c.CoreReadyRetries = 7

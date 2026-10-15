@@ -79,7 +79,23 @@ func (a *Agent) loop() {
 			wait = time.Duration(cfg.CheckIntervalMinutes) * time.Minute
 		}
 
+		// A kick that arrived while RunOnce was still running would otherwise
+		// make sleep() return instantly and trigger a redundant back-to-back
+		// check (and a second switch). Collapse those before waiting.
+		a.drainKick()
+
 		if a.sleep(wait) {
+			return
+		}
+	}
+}
+
+// drainKick discards any pending kick without blocking.
+func (a *Agent) drainKick() {
+	for {
+		select {
+		case <-a.kick:
+		default:
 			return
 		}
 	}
