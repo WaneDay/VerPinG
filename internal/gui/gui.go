@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -51,6 +52,26 @@ func editAtBottom(te *walk.TextEdit) bool {
 		return true
 	}
 	return int(si.NPos)+int(si.NPage) >= int(si.NMax)
+}
+
+// setLogText swaps the whole buffer with WM_SETTEXT only. It deliberately
+// never uses AppendText/SetTextSelection: those send EM_SETSEL/EM_REPLACESEL,
+// which scroll the caret into view and make Windows play the default beep.
+// Scroll is restored with WM_VSCROLL / EM_LINESCROLL instead, both silent.
+func setLogText(te *walk.TextEdit, txt string, follow bool) {
+	hwnd := te.Handle()
+	first := int32(0)
+	if !follow {
+		first = int32(win.SendMessage(hwnd, win.EM_GETFIRSTVISIBLELINE, 0, 0))
+	}
+	_ = te.SetText(txt)
+	if follow {
+		win.SendMessage(hwnd, win.WM_VSCROLL, win.SB_BOTTOM, 0)
+		return
+	}
+	if delta := first - int32(win.SendMessage(hwnd, win.EM_GETFIRSTVISIBLELINE, 0, 0)); delta != 0 {
+		win.SendMessage(hwnd, win.EM_LINESCROLL, 0, uintptr(int64(delta)))
+	}
 }
 
 // Run builds and runs the native window + tray icon. It blocks until exit and
@@ -328,8 +349,13 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 		}
 	})
 
-	// ---- periodic log refresh (append-only so the wheel keeps working;
-	// auto-scroll only when already at the bottom) ----
+	// ---- periodic log refresh (append-only so the wheel keeps working) ----
+	// VERPING_NO_GUI_LOG=1 skips touching the TextEdit entirely; file logging
+	// still runs. Diagnostic aid for isolating a system default beep.
+	noGuiLog := os.Getenv("VERPING_NO_GUI_LOG") == "1"
+	if noGuiLog {
+		logger.Warn("[diag] GUI log panel refresh disabled (VERPING_NO_GUI_LOG=1)")
+	}
 	stopRefresh := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -344,38 +370,12 @@ func Run(dir, exeDir string, show bool, ag *agent.Agent) {
 				if txt == last {
 					continue
 				}
-				add := txt
-				incremental := false
-				if last != "" && strings.HasPrefix(txt, last) {
-					add = txt[len(last):]
-					incremental = true
-				}
 				last = txt
+				if noGuiLog {
+					continue
+				}
 				mw.Synchronize(func() {
-					if !incremental {
-						_ = logEdit.SetText(txt)
-						n := logEdit.TextLength()
-						logEdit.SetTextSelection(n, n)
-						logEdit.ScrollToCaret()
-						return
-					}
-					atBottom := editAtBottom(logEdit)
-					logEdit.AppendText(add)
-					if logEdit.TextLength() > 60000 {
-						keep := logEdit.Text()
-						if len(keep) > 20000 {
-							keep = keep[len(keep)-20000:]
-							if i := strings.Index(keep, "\n"); i >= 0 {
-								keep = keep[i+1:]
-							}
-						}
-						_ = logEdit.SetText(keep)
-					}
-					if atBottom {
-						n := logEdit.TextLength()
-						logEdit.SetTextSelection(n, n)
-						logEdit.ScrollToCaret()
-					}
+					setLogText(logEdit, txt, editAtBottom(logEdit))
 				})
 			}
 		}

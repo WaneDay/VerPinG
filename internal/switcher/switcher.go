@@ -230,6 +230,13 @@ func RunOnce(cfg config.Config) {
 		logger.Warn("all candidates delay unknown, skip")
 		return
 	}
+	// After the round-robin retests the current node may already be back
+	// inside the threshold and simply be the group's lowest. That is a
+	// healthy state, not an all-bad stretch, so no switch and no popup.
+	if best == cur && bd <= threshold {
+		logger.Infof("current node already lowest and within threshold: %s delay=%d (threshold=%d)", cur, bd, threshold)
+		return
+	}
 	// NOTE: the fallback switch runs even in test_mode (same class of action
 	// as stage 1/2, which also run in test_mode); test_mode only suppresses
 	// the popup, so a bad stretch stays visible yet silent.
