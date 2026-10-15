@@ -14,9 +14,5 @@
 *.test
 *.out
 
-# python (reference implementation)
-__pycache__/
-*.pyc
-
 # release setup exe is published to git intentionally (negation must stay last)
 !/release/VerPinG-Setup-1.0.0.exe

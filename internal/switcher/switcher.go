@@ -13,11 +13,23 @@ import (
 	"verping/internal/notify"
 )
 
-func getHistoryDelay(p api.Proxy) int {
+// getHistoryDelay returns the most recent usable delay sample, treating any
+// sample older than maxAge as expired (returns 0 so the caller re-tests the
+// node live). A maxAge <= 0 disables the age check; samples whose timestamp
+// cannot be parsed are accepted as-is for backward compatibility.
+func getHistoryDelay(p api.Proxy, maxAge time.Duration) int {
+	now := time.Now()
 	for i := len(p.History) - 1; i >= 0; i-- {
-		if p.History[i].Delay > 0 {
-			return p.History[i].Delay
+		h := p.History[i]
+		if h.Delay <= 0 {
+			continue
 		}
+		if maxAge > 0 {
+			if t, err := time.Parse(time.RFC3339Nano, h.Time); err == nil && now.Sub(t) > maxAge {
+				return 0
+			}
+		}
+		return h.Delay
 	}
 	return 0
 }
@@ -52,16 +64,25 @@ func RunOnce(cfg config.Config) {
 		return cli.DelayTest(name, cfg.TestURL, cfg.DelayTimeoutMs)
 	}
 
+	// History samples older than two check intervals are treated as expired
+	// ("unknown"), so the pool effectively resets every few cycles: a
+	// long-stale sample can never pose as a fresh delay. Floor of 5 minutes
+	// keeps the fast path usable on short intervals.
+	maxAge := 2 * time.Duration(cfg.CheckIntervalMinutes) * time.Minute
+	if maxAge < 5*time.Minute {
+		maxAge = 5 * time.Minute
+	}
+
 	// The current node is always freshly tested ("refresh, then judge"),
 	// so the decision matches what a dashboard manual test shows.
 	// History is only a fallback when the live test fails.
 	curDelay := activeDelay(cur)
 	curSrc := "fresh"
 	if curDelay == 0 {
-		curDelay = getHistoryDelay(gp)
+		curDelay = getHistoryDelay(gp, maxAge)
 		if curDelay == 0 {
 			if p, ok := pr.Proxies[cur]; ok {
-				curDelay = getHistoryDelay(p)
+				curDelay = getHistoryDelay(p, maxAge)
 			}
 		}
 		curSrc = "history"
@@ -117,19 +138,24 @@ func RunOnce(cfg config.Config) {
 	}
 
 	// Seed the pool from history; fresh tests below overwrite per node.
+	// Samples past the TTL count as expired and are simply left empty so
+	// they get re-tested (fillMissing) instead of trusted.
 	pool := map[string]int{}
-	withHist := 0
+	withHist, expired := 0, 0
 	for _, n := range names {
 		d := 0
 		if p, ok := pr.Proxies[n]; ok {
-			d = getHistoryDelay(p)
+			d = getHistoryDelay(p, maxAge)
+			if d == 0 && len(p.History) > 0 {
+				expired++
+			}
 		}
 		pool[n] = d
 		if d > 0 {
 			withHist++
 		}
 	}
-	logger.Infof("candidates total=%d with-history=%d", len(names), withHist)
+	logger.Infof("candidates total=%d with-history=%d expired=%d", len(names), withHist, expired)
 
 	fillMissing := func(cands []string) {
 		var need []string

@@ -9,7 +9,8 @@
 - 当前延时 `<= 阈值`（默认 220ms）：不切换
 - 当前延时 `> 阈值`：优先切到**同国家** `< 阈值` 的节点，否则切到**全组延时最低**且 `< 阈值` 的节点
 - 全部节点都超阈值：切到全组当前延时最低的节点并弹窗提醒，之后继续定时巡检（`test_mode=true` 时仅记录日志，不切换不弹窗）
-- 当前节点每次都重新实测延时再判定（与面板手动测速一致）；候选节点优先历史值、缺失补测，切换前再实测确认一次
+- 当前节点每次都重新实测延时再判定（与面板手动测速一致）；候选节点优先历史值（**超过有效期的历史自动作废并重新实测**）、缺失补测，切换前再实测确认一次
+- **秒切**：若历史中存在达标候选，先对最优候选做一次实时复测，通过即立即切换，省去整组扫描
 - 关闭窗口仅最小化到托盘；托盘左键单击打开界面，右键可「打开界面 / 隐藏界面 / 退出」
 - 仅在**系统代理开启**时工作，代理关闭时自动待机（跟随系统代理开关）
 - 开机自启（写注册表 Run 键），界面内可即时启用/关闭
@@ -37,14 +38,18 @@
 | `controller_url` | 外部控制器地址 | `http://127.0.0.1:9090` |
 | `secret` | 控制器密钥 | `set-your-secret` |
 | `test_url` | 测速 URL | `https://cp.cloudflare.com/generate_204` |
-| `delay_timeout_ms` | 单次测速超时（ms） | `5000` |
+| `delay_timeout_ms` | 单次测速超时（ms） | `2000` |
 | `http_timeout_ms` | HTTP 请求超时（ms） | `5000` |
-| `max_concurrent_delay_tests` | 并发测速数 | `4` |
+| `max_concurrent_delay_tests` | 并发测速数 | `8` |
 | `core_ready_retries` | 内核就绪重试次数 | `7` |
 | `core_ready_interval_ms` | 内核就绪重试间隔（ms） | `1800` |
 | `test_mode` | 静默模式：切换照常执行，只是不弹窗 | `true` |
 | `fallback_profiles` | 旧版订阅兜底，已废弃（现为最低延时切换+弹窗） | `[]` |
 | `country_aliases` | 国家/地区关键词表 | 见 `config.example.json` |
+
+> 历史延时来自内核 `/proxies` 的 `history`（含时间戳）。超过**有效期 TTL** 的样本自动作废并重新实测，
+> TTL 固定为 `2 × check_interval_minutes`（下限 5 分钟），因此历史每经过几个巡检周期即自动"重置"，
+> 无需手动清理；插件本身不持久化历史——内核重启后历史清空即全量重测，插件重启则重新读取内核历史。
 
 配置与日志位置：若 exe 所在目录可写则就地存放（绿色版）；否则回退到
 `%APPDATA%\VerPinG`。日志文件为 `<数据目录>\logs\app.log`。
@@ -96,7 +101,6 @@ internal/agent          后台巡检协程（随系统代理开关启停）
 internal/gui            原生窗口 + 托盘（github.com/lxn/walk）
 app.manifest            程序清单（Common Controls v6 + DPI 感知）
 rsrc.syso               由 rsrc 生成（已内置）
-experimental/           Python 参考实现（非发布内容）
 ```
 
 ## 许可
