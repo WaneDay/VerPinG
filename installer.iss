@@ -2,7 +2,7 @@
 ; Build the exe first (build.bat), then compile this script with ISCC.
 
 #define MyAppName "VerPinG"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "VerPinG"
 #define MyAppExeName "VerPinG.exe"
 
